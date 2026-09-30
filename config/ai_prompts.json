@@ -1,0 +1,30 @@
+{
+  "classification": {
+    "prompt": "你是一个新闻分类专家。请分析以下新闻，返回JSON格式结果。\n\n新闻标题：{title}\n新闻摘要：{summary}\n来源：{source}\n\n请从以下类别中选择最匹配的一个：\nPolitics, Economy, Technology, Science, Military, Energy, Finance, Society, Climate, Health, Culture, Other\n\n请判断主要涉及的国家/地区（可多选）：\nUSA, China, UK, EU, Russia, Japan, Korea, India, ASEAN, MiddleEast, Africa, LatinAmerica, Global\n\n返回格式（仅返回JSON，不要其他内容）：\n{{\n  \"category\": \"类别\",\n  \"countries\": [\"国家1\", \"国家2\"]\n}}",
+    "categories": ["Politics", "Economy", "Technology", "Science", "Military", "Energy", "Finance", "Society", "Climate", "Health", "Culture", "Other"],
+    "countries": ["USA", "China", "UK", "EU", "Russia", "Japan", "Korea", "India", "ASEAN", "MiddleEast", "Africa", "LatinAmerica", "Global"]
+  },
+  "scoring": {
+    "prompt": "你是一个新闻价值评估专家。请为以下新闻打分（0-100分）。\n\n评分维度：\n1. 全球影响力(0-30分) - 影响多少国家和人群\n2. 经济/金融影响 (0-25分) - 对市场、经济的影响程度\n3. 政治/政策影响 (0-25分) - 对国际关系、政策的影响\n4. 持续追踪价值(0-20分) - 是否值得关注后续发展\n\n评分参考标准：\n- 90-100: 改变全球格局的重大事件（战争爆发、重大条约、全球性危机）\n- 75-89:  重要政策/经济数据/地缘事件（央行决策、大选、贸易协议）\n- 60-74:  区域性重要事件（区域冲突、重要立法、大型企业动向）\n- 40-59:  一般新闻（常规政策调整、行业报告、学术发布）\n- 0-39:   低优先级（地方新闻、娱乐八卦、日常事件）\n\n新闻标题：{title}\n新闻摘要：{summary}\n分类：{category}\n\n返回格式（仅返回JSON）：\n{{\n  \"score\": 分数,\n  \"reasoning\": \"打分理由（一句话）\",\n  \"breakdown\": {{\n    \"global_impact\": 分数,\n    \"economic_impact\": 分数,\n    \"political_impact\": 分数,\n    \"follow_value\": 分数\n  }}\n}}",
+    "score_range": [0, 100],
+    "thresholds": {
+      "critical": [90, 100],
+      "important": [75, 89],
+      "regional": [60, 74],
+      "general": [40, 59],
+      "low": [0, 39]
+    }
+  },
+  "summary": {
+    "prompt": "你是一名中文新闻编辑。请用中文撰写一段 3~5 句话的新闻摘要，总长度以 120 汉字为目标（允许 100~160 字）。\n\n写作要求：\n1. 第一句交代「谁（国家/机构/人物）在什么时间做了什么决定或发生了什么事」。\n2. 第二句说明事件发生的直接背景或导火索。\n3. 第三句说明对市场、政策、普通人群或地缘局势的影响。\n4. 必要时用第四、五句补充后续进展或各方反应。\n5. 全文必须是简体中文；如果原文标题或摘要是英文，请先翻译为中文再总结，绝对禁止输出英文句子；英文术语必须附中文译名，例如写成「美联储（Fed）」而不是单独 Fed。\n6. 不要以「摘要：」「总结：」「以下是…」开头，直接输出正文即可。\n\n新闻标题：{title}\n新闻摘要：{summary}\n\n只输出正文，不要列表、不要编号、不要任何解释。",
+    "min_chars": 100,
+    "target_chars": 120,
+    "max_chars": 220,
+    "retry_short_prompt": "你上一次的摘要太短（仅 {actual_chars} 字），请补充更多背景、影响或后续信息，使全文达到 {target_chars} 字左右，仍然只输出中文正文，不要其他说明。",
+    "retry_english_prompt": "你上一次的摘要包含过多英文。请全部改写为简体中文，英文术语必须配中文译名（例如写成「美联储（Fed）」），然后按 100~160 字重写完整摘要，仅输出正文。"
+  },
+  "deduplication": {
+    "prompt": "判断以下两条新闻是否报道同一事件。\n\n新闻1标题：{title1}\n新闻1摘要：{summary1}\n新闻1来源：{source1}\n\n新闻2标题：{title2}\n新闻2摘要：{summary2}\n新闻2来源：{source2}\n\n如果是同一事件，返回：\n{{\n  \"same_event\": true,\n  \"event_name\": \"事件简短名称\"\n}}\n\n如果不是，返回：\n{{\n  \"same_event\": false\n}}",
+    "event_id_format": "{主题}_{日期}"
+  }
+}
