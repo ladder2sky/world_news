@@ -9,6 +9,8 @@ from typing import List, Dict, Any
 from loguru import logger
 
 import settings
+from output.report_builder import _normalize_source_label
+
 
 class CSVGenerator:
     """CSV报告生成器"""
@@ -44,7 +46,7 @@ class CSVGenerator:
         # CSV字段定义
         fieldnames = [
             'date', 'rank', 'title', 'source', 'category', 'country',
-            'ai_summary', 'score', 'event_id', 'url'
+            'ai_summary', 'score', 'related_count', 'event_id', 'url'
         ]
         
         try:
@@ -64,11 +66,12 @@ class CSVGenerator:
                         'date': date_str,
                         'rank': rank,
                         'title': news.get('title', ''),
-                        'source': news.get('source', ''),
+                        'source': _normalize_source_label(news.get('source', '')),
                         'category': news.get('category', 'Other'),
                         'country': news.get('country', 'Global'),
                         'ai_summary': news.get('ai_summary', ''),
                         'score': news.get('importance_score', 0),
+                        'related_count': news.get('related_count', 0) or 0,
                         'event_id': news.get('event_id', ''),
                         'url': news.get('url', ''),
                     }

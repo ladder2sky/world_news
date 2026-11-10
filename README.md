@@ -85,6 +85,8 @@ Copy-Item .env.example .env
 | `NEWS_AGE_HOURS` | `24` | 只入库 24 小时内发布的新闻（防止 RSS 历史积压把库里塞满）。 |
 | `MAX_RETRIES` | `3` | RSS / LLM 请求失败的最大重试次数（指数退避）。 |
 | `SCORE_THRESHOLD_TOP` | `70` | Top 报告最低分数门槛（< 70 不进 CSV 排名）。 |
+| `REPORT_WINDOW_DAYS` | `3` | **报告时间窗（天）**：报告只输出该窗口内发布/抓取的新闻，`0`=不限（全库历史总榜）。CLI `--days N` 可临时覆盖。 |
+| `REPORT_DEDUP_RARE_DF` | `80` | **报告去重阈值**：一条标题里的专有名词，在全库标题中出现次数 ≤ 该值算「稀有实体」，两条新闻共享 ≥2 个稀有实体即视为同一事件合并。调小=更保守，调大=更激进。 |
 | `TTS_VOICE` | `zh-CN-XiaoxiaoNeural` | edge-tts 朗读音色。 |
 | `LOG_LEVEL` | `INFO` | 日志等级：`DEBUG` / `INFO` / `WARNING` / `ERROR`。 |
 
@@ -151,8 +153,13 @@ AI_MODEL_MAIN=qwen2.5:7b
 
 ```powershell
 .\.venv\scripts\python.exe main.py --reports-only
+
+# 想临时换时间窗（只出近 7 天）：
+.\.venv\scripts\python.exe main.py --reports-only --days 7
 ```
 **最快**。只要 DB 里已经有 `is_processed=1` 的分析结果，想改完 `AI_TOP_N` 重排 CSV、或者把昨天的报告按今天日期重命名一份，就用这个。完全不烧 token。
+
+> 报告默认只取**近 3 天**（`REPORT_WINDOW_DAYS`）内发布/抓取的新闻，再按标题**去重**（同一事件的多次报道只留评分最高的一条，报告里标注「另有 N 篇相关报道」）。所以每天跑出来的报告会随新新闻变化，不会和昨天一模一样。`--days 0` 可改回「全库历史总榜」。
 
 ### 4. 只重算中文摘要（不动分类/打分，省 2/3 token）
 
@@ -236,6 +243,13 @@ $env:AI_MODEL_MAIN='hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M.gguf'
 
 ### Q：跑 2 次 `--analyze-only`，CSV 为什么不是 100 条？
 因为 CSV 有**全局最高分 40 条**的上限（`AI_TOP_N * 2`）。想扩大日报容量：`$env:AI_TOP_N=50` 后跑 `--reports-only`，立刻得到 100 条 CSV。
+
+### Q：昨天和今天两次运行，输出为什么几乎一模一样？
+历史上有两层原因，现在都已修好：
+1. **报告取数没有日期过滤**：老版 `get_top_news` 取的是「全库历史总榜」，昨天和今天当然是同一批高分新闻。现在改成只取**近 3 天**（`REPORT_WINDOW_DAYS`）。
+2. **同一事件的重复报道占满 TOP**：比如「英伟达黄仁勋」相关报道可能占 8 个位置。现在报告层加了**标题去重**，同一事件只留评分最高的一条并标注「另有 N 篇相关报道」。
+
+> 如果发现报告还是和昨天差不多，先确认 AI 阶段没被跳过：日志里看到 `AI service not available` 说明 LM Studio 没 Start Server，新新闻没被分析自然进不了「近 3 天」榜单。
 
 ### Q：为什么 `ai_summary` 列有些非常短？
 常见 3 种情况，都有对应开关修：

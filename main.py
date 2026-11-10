@@ -5,7 +5,7 @@
 import sys
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -53,6 +53,7 @@ from collector.rss_reader import RSSReader
 from ai.analyzer import NewsAnalyzer
 from output.csv_generator import CSVGenerator
 from output.report_builder import ReportBuilder
+from output.deduplicator import dedupe_news
 from tts.script_generator import ScriptGenerator
 
 def load_sources_from_json(db: DatabaseManager):
@@ -92,12 +93,13 @@ def load_sources_from_json(db: DatabaseManager):
         logger.error(f"Failed to load RSS sources: {e}")
         raise
 
-def run_news_collection(run_type: str = "full"):
+def run_news_collection(run_type: str = "full", window_days: Optional[int] = None):
     """
     执行新闻采集流程
     
     Args:
         run_type: 运行类型 (full/incremental/manual)
+        window_days: 报告时间窗天数（0/None 表示不限）
     """
     start_time = time.time()
     logger.info(f"=" * 60)
@@ -206,30 +208,9 @@ def run_news_collection(run_type: str = "full"):
             logger.info("-" * 40)
             logger.info("Phase 4: Report Generation")
             logger.info("-" * 40)
-            
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            
-            # 获取已处理的新闻
-            processed_news = db.get_top_news(count=settings.AI_TOP_N * 2)
-            
-            if processed_news:
-                news_dicts = [dict(row) for row in processed_news]
-                
-                # CSV报告
-                csv_gen = CSVGenerator()
-                csv_path = csv_gen.generate_daily_csv(news_dicts, today_str)
-                logger.info(f"CSV report: {csv_path}")
-                
-                # 文本摘要
-                report_builder = ReportBuilder()
-                summary_path = report_builder.build_summary_text(news_dicts, today_str)
-                logger.info(f"Summary report: {summary_path}")
-                
-                # TTS脚本
-                script_gen = ScriptGenerator()
-                script_path = script_gen.generate_script(news_dicts, max_count=10, date_str=today_str)
-                logger.info(f"TTS script: {script_path}")
-            else:
+
+            out = generate_reports_from_db(db, window_days=window_days)
+            if out['count'] == 0:
                 logger.warning("No processed news available for reports")
             
             # 9. 完成运行记录
@@ -250,22 +231,43 @@ def run_news_collection(run_type: str = "full"):
             logger.error(f"Collection failed: {e}")
             raise
 
-def generate_reports_from_db(db: DatabaseManager) -> dict:
+def _window_since(window_days: Optional[int]) -> Optional[str]:
+    """把「近 N 天」换算成查询用的起始日期字符串；0/None 表示不限。"""
+    if not window_days or window_days <= 0:
+        return None
+    return (datetime.now() - timedelta(days=window_days)).strftime('%Y-%m-%d')
+
+
+def generate_reports_from_db(db: DatabaseManager, window_days: Optional[int] = None) -> dict:
     """
     从数据库读取已分析（is_processed=1）的新闻生成 CSV / 文本摘要 / TTS 播报脚本。
+
+    - 只取「时间窗内」的新闻（window_days 天，0/None 表示不限）
+    - 按标题去重后只保留每个事件评分最高的一条，并统计同簇报道数
 
     供 --analyze-only 跑完之后使用，也可独立被 --reports-only / --resummarize 调用。
     """
     today_str = datetime.now().strftime('%Y-%m-%d')
-    processed_news = db.get_top_news(count=settings.AI_TOP_N * 2)
+    since = _window_since(window_days if window_days is not None else settings.REPORT_WINDOW_DAYS)
+    rows = db.get_top_news(count=settings.AI_TOP_N * 2, since=since)
 
-    result = {'csv': None, 'summary': None, 'script': None, 'count': 0}
-    if not processed_news:
+    result = {'csv': None, 'summary': None, 'script': None, 'count': 0,
+              'since': since, 'raw_count': 0, 'merged': 0}
+    if not rows:
         logger.warning("No processed (AI-analyzed) news available for reports — run --analyze-only first.")
         return result
 
-    news_dicts = [dict(row) for row in processed_news]
+    news_dicts = [dict(row) for row in rows]
+    result['raw_count'] = len(news_dicts)
+
+    news_dicts = dedupe_news(news_dicts, corpus_titles=db.get_title_corpus(),
+                             rare_df=settings.REPORT_DEDUP_RARE_DF)
+    result['merged'] = result['raw_count'] - len(news_dicts)
     result['count'] = len(news_dicts)
+
+    logger.info(f"Report window: since={since or 'unlimited'} | "
+                f"{result['raw_count']} items -> {result['count']} after dedup "
+                f"(merged {result['merged']})")
 
     csv_gen = CSVGenerator()
     result['csv'] = csv_gen.generate_daily_csv(news_dicts, today_str)
@@ -378,6 +380,11 @@ def main():
         action='store_true',
         help='测试RSS源可用性'
     )
+    parser.add_argument(
+        '--days', type=int, default=None,
+        help='报告时间窗（天）：只输出该窗口内发布/抓取的新闻；0=不限。'
+             '默认取 settings.REPORT_WINDOW_DAYS（近3天）'
+    )
 
     args = parser.parse_args()
 
@@ -407,7 +414,7 @@ def main():
             with DatabaseManager() as db:
                 db.initialize_schema()
                 load_sources_from_json(db)
-                out = generate_reports_from_db(db)
+                out = generate_reports_from_db(db, window_days=args.days)
             logger.success(f"Reports generated from DB ({out['count']} items)")
 
         elif args.resummarize or args.resummarize_all:
@@ -419,7 +426,7 @@ def main():
                 logger.info("-" * 40)
                 logger.info("Phase 4: Report Generation (post resummarize)")
                 logger.info("-" * 40)
-                out = generate_reports_from_db(db)
+                out = generate_reports_from_db(db, window_days=args.days)
             logger.success(f"Resummarize flow complete — reports refreshed ({out['count']} items)")
 
         elif args.analyze_only:
@@ -453,10 +460,10 @@ def main():
                 logger.info("-" * 40)
                 logger.info("Phase 4: Report Generation")
                 logger.info("-" * 40)
-                out = generate_reports_from_db(db)
+                out = generate_reports_from_db(db, window_days=args.days)
 
         else:
-            run_news_collection(args.type)
+            run_news_collection(args.type, window_days=args.days)
     
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")

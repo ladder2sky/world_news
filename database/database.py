@@ -207,25 +207,37 @@ class DatabaseManager:
             (category, country, ai_summary, importance_score, event_id, news_id)
         )
     
-    def get_top_news(self, count: int = 20, min_score: int = 0) -> List[sqlite3.Row]:
+    def get_top_news(self, count: int = 20, min_score: int = 0,
+                     since: Optional[str] = None) -> List[sqlite3.Row]:
         """
         获取评分最高的新闻
         
         Args:
             count: 返回数量
             min_score: 最低评分阈值
+            since: 时间窗起点（如 '2026-11-07'）；只返回该时间之后发布/抓取的新闻，
+                   传 None 表示不限（全库历史总榜）
             
         Returns:
             新闻列表
         """
-        cursor = self.connection.execute(
-            """SELECT * FROM news 
-               WHERE is_processed = 1 AND importance_score >= ?
-               ORDER BY importance_score DESC, published_time DESC 
-               LIMIT ?""",
-            (min_score, count)
-        )
+        sql = """SELECT * FROM news
+                 WHERE is_processed = 1 AND importance_score >= ?"""
+        params: List[Any] = [min_score]
+        if since:
+            sql += " AND COALESCE(published_time, fetched_time) >= ?"
+            params.append(since)
+        sql += " ORDER BY importance_score DESC, published_time DESC LIMIT ?"
+        params.append(count)
+        cursor = self.connection.execute(sql, tuple(params))
         return cursor.fetchall()
+
+    def get_title_corpus(self, limit: int = 5000) -> List[str]:
+        """取全库新闻标题，用作去重时统计实体文档频率（df）的背景语料。"""
+        cursor = self.connection.execute(
+            "SELECT title FROM news ORDER BY id DESC LIMIT ?", (int(limit),)
+        )
+        return [r['title'] for r in cursor.fetchall() if r['title']]
     
     # ==================== 来源操作 ====================
     

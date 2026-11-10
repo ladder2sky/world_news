@@ -26,6 +26,12 @@ RETRY_DELAY = int(os.getenv("RETRY_DELAY", "1"))                # 初始重试�
 # 评分阈值
 SCORE_THRESHOLD_TOP = int(os.getenv("SCORE_THRESHOLD_TOP", "70"))  # Top新闻最低分数
 
+# 报告时间窗（天）：只输出该窗口内发布/抓取的新闻；0 表示不限（全库历史总榜）
+REPORT_WINDOW_DAYS = int(os.getenv("REPORT_WINDOW_DAYS", "3"))
+
+# 报告去重：稀有实体文档频率阈值（实体在全库标题里出现次数 <= 该值算「稀有」）
+REPORT_DEDUP_RARE_DF = int(os.getenv("REPORT_DEDUP_RARE_DF", "80"))
+
 # TTS配置
 TTS_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_OUTPUT_DIR = BASE_DIR / "output_data" / "audio"

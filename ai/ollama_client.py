@@ -35,6 +35,253 @@ def _normalize_base_url(raw: str) -> str:
     return raw
 
 
+# ------------------------------------------------------------------ sanitizer
+# 常见缩写：这些词如果出现在「XXX(缩写)」或「(缩写)」里，一般是模型过度解释，统一去除括号、
+# 若只剩缩写本身则直接保留去掉括号的干净形式。
+_COMMON_ABBREVS = {
+    'fed', 'ecb', 'opec', 'opec+', 'nato', 'un', 'rba', 'boj', 's&p 500',
+    's&p500', 's&p', 'vix', 'cpi', 'pce', 'gdp', 'imf', 'who', 'wto',
+    'reuters', 'ap', 'bbc', 'cnn', 'fomc', 'ec', 'pboc', 'boj', 'boe',
+    'sec', 'fdic', 'eia', 'iea', 'idf', 'eu', 'asean', 'hkma', 'mas',
+    'us', 'usa', 'uk', 'jp', 'kr', 'cn', 'apec', 'g7', 'g20', 'brent', 'wti',
+}
+
+# 「中文前缀(缩写)」里，前缀本身是对应缩写的标准中文译名的，直接删缩写括号：
+#   美联储(Fed) → 美联储 ;  欧洲央行(ECB) → 欧洲央行
+_TRANSLATION_MAP = {
+    '美联储': 'fed', '美国联邦储备委员会': 'fed', '美国联邦储备理事会': 'fed',
+    '欧洲央行': 'ecb', '欧洲中央银行': 'ecb',
+    '石油输出国组织': 'opec', '欧佩克': 'opec',
+    '北约': 'nato', '北大西洋公约组织': 'nato',
+    '联合国': 'un',
+    '澳大利亚储备银行': 'rba', '澳联储': 'rba',
+    '日本央行': 'boj', '日本银行': 'boj',
+    '国际货币基金组织': 'imf', '基金组织': 'imf',
+    '世界卫生组织': 'who', '世卫组织': 'who', '世卫': 'who',
+    '世界贸易组织': 'wto', '世贸组织': 'wto', '世贸': 'wto',
+    '中国人民银行': 'pboc', '央行': 'pboc',
+    '英国央行': 'boe', '英格兰银行': 'boe',
+    '消费者物价指数': 'cpi', '居民消费价格指数': 'cpi',
+    '个人消费支出': 'pce', '国内生产总值': 'gdp',
+    '美国证券交易委员会': 'sec', '证券交易委员会': 'sec',
+    '联邦存款保险公司': 'fdic',
+    '欧盟': 'eu', '欧洲联盟': 'eu',
+    '东盟': 'asean', '东南亚国家联盟': 'asean',
+    '国际能源署': 'iea', '美国能源信息署': 'eia',
+    '以色列国防军': 'idf',
+    '亚太经济合作组织': 'apec', '亚太经合组织': 'apec',
+}
+
+
+def _sanitize_llm_text(text: str) -> str:
+    """
+    LLM 输出文本的统一清洗（reasoning_content 恢复出来的正文 & content 正文都会走这里）：
+      1. 剥 ``` 代码块 / "摘要：" / "总结：" / 数字编号前缀
+      2. 删除 (1)(2)(3)… 乃至 （100）（101）… 的多位数编号括号 & "The N characters:" / "Count:" 行
+      3. 删行首 CoT 元话术前缀（Role/Task/Final Polish/Impact/Status/Total characters…）
+      4. 丢掉整行不含汉字的 CoT 残渣行（前提：整段至少有一行含汉字）
+      5. 对常见缩写的过度括号做压缩：
+         - 「美联储(Fed)」 / 「美联储 (Fed)」  →  「美联储」
+         - 「标普 500(S&P 500)」这种括号里外是一回事 → 保留前面的中文名或缩写之一
+         - 括号内容是纯常见缩写 + 长度 <= 10，且出现>=3对括号时，全部剥除到只剩<2对
+      6. 剥连续的 Source: News - XXX 前缀（等下由 report_builder 里正经 Source 字段接管）
+      7. 中文标点规范化："()" -> "（）" 但本函数里方向：英文括号->中文括号，只有需要保留的括号才规范；
+         我们尽量直接去掉多余括号，能不保留就不保留。
+    """
+    if not text:
+        return ''
+
+    s = text.replace('\r\n', '\n').replace('\r', '\n').strip()
+
+    # 1) 剥代码块
+    s = re.sub(r'^```(?:json|text)?\s*', '', s, flags=re.MULTILINE)
+    s = re.sub(r'\s*```\s*$', '', s, flags=re.MULTILINE)
+
+    # 2) 剥 "The N characters:" 这种逐字计数整行
+    s = re.sub(r'(?im)^\s*The\s+\d+\s+characters?\s*[:：]\s*', '', s)
+    s = re.sub(r'(?im)^\s*Character\s+count\s*[:：].*$', '', s)
+    s = re.sub(r'(?im)^\s*Let\'?s\s+check\s+character\s+count.*$', '', s)
+    # 同段内嵌的 The 62 characters: (1)x(2)y ... 这种也剥（不是整行的情况）
+    s = re.sub(r'(?i)The\s+\d+\s+characters?\s*[:：]\s*', '', s)
+
+    # 3) 剥 (1)(2)(3)... / （1）（2）（3）... 数字编号括号（中文括号也去掉）
+    #    注意要覆盖多位数字：模型数汉字时会输出 （100）（101）… 这种三位数逐字计数
+    s = re.sub(r'\(\s*\d{1,4}\s*\)', '', s)
+    s = re.sub(r'（\s*\d{1,4}\s*）', '', s)
+    # 1. 2. 3. / 1) 2) 3) 这种一行内编号（不是列表，正文里的）
+    s = re.sub(r'(?<!\d)\b\d{1,2}\s*[.)、]\s*(?=[\u4e00-\u9fa5A-Z])', '', s)
+
+    # 4) 剥 Role: / Task: / Final Polish: / Count: / Impact/Status: 类行首 CoT 元话术前缀
+    s = re.sub(
+        r"(?im)^[\s\*\-•]*("
+        r"Role|Task|Target length|Structure requirements|Language requirements|"
+        r"Constraint|Who/When/What|Context|Impact\s*/\s*Status|Impact|Status|"
+        r"Final\s+(?:Text|Polish|Answer|Draft)(?:\s+Construction)?|Final|"
+        r"Count|Text|Total\s+characters?|Character\s+count(?:\s+check)?|"
+        r"Let'?s\s+[^\n。！？]{0,60}|Wait[^\n。！？]{0,60}|"
+        r"Refine[d]?|Re-?verify[^\n。！？]{0,60}|Numbering|Meta-?talk"
+        r")\s*[:：]?\s*",
+        '', s,
+    )
+
+    # 5) 剥 "Summary:" / "摘要：" / "总结：" / "最终回答：" 前缀
+    s = re.sub(
+        r'(?im)^\s*(Summary|最终回答|最终答案|中文摘要|简要回答|总结|综上所述|综上|因此|简而言之|简言之)\s*[:：]\s*',
+        '', s,
+    )
+
+    # 6) 先强制对 _TRANSLATION_MAP 的标准译名做「整词整句」剥除
+    #    （避免括号压缩器因为前缀过短而没抓到）
+    s = _strip_known_translation_parens(s)
+
+    # 7) 连续 3+ 对括号压缩 + 常见缩写去括号
+    s = _collapse_brackets(s)
+
+    # 8) Source: News - XXX 这类脏前缀（如果被误混进正文里的话）
+    s = re.sub(r'(?im)^\s*Source\s*[:：]\s*News\s*-\s*', 'Source: ', s)
+
+    # 9) 去掉句首「孤立引号」（CoT 残渣）：仅当整段没有与之配对的闭引号时才剥，避免误伤正文引号
+    for open_q, close_q in (('"', '"'), ('\u201c', '\u201d')):
+        if s.startswith(open_q) and close_q not in s[1:]:
+            s = s[1:].lstrip()
+
+    # 10) 丢掉「整行不含任何汉字」的 CoT 元话术行（如裸的 "Final Polish:"、"No numbering? Yes."）。
+    #    前提是整段至少有一行含汉字——若整段都没汉字（模型整段跑英文），保留原样交给质量门重试。
+    if any('\u4e00' <= ch <= '\u9fff' for ch in s):
+        s = '\n'.join(
+            ln for ln in s.split('\n')
+            if (not ln.strip()) or any('\u4e00' <= ch <= '\u9fff' for ch in ln)
+        )
+
+    # 11) 合并多余空白
+    s = re.sub(r'[ \t\u3000]+', ' ', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+
+def _strip_known_translation_parens(s: str) -> str:
+    """
+    对 _TRANSLATION_MAP 里收录的标准译名执行硬剥除：
+      美联储(Fed) / 美联储 （Fed） / 美联储（Fed）、  -> 美联储
+    大小写不敏感，允许中/英文括号、前后 0~2 个空格。
+    """
+    if not s:
+        return s
+    for zh_cn, abbr in _TRANSLATION_MAP.items():
+        # 允许：(abbr) （abbr） [空格 0~2]
+        pat = re.compile(
+            r'%s\s{0,2}[\(（]\s*%s\s*[\)）]\s{0,2}' % (re.escape(zh_cn), re.escape(abbr)),
+            re.IGNORECASE,
+        )
+        s = pat.sub(zh_cn, s)
+    return s
+
+
+def _collapse_brackets(s: str) -> str:
+    """
+    针对括号过多的核心压缩策略：
+      A. 先把所有英文括号 () 都先替换成中文（），然后统一处理中文括号；
+         这样不用区分半角/全角。
+      B. 对每一对「前缀 + (内容)」分类处理：
+         1. 前缀是标准中文译名，括号内容是对应常见缩写（_TRANSLATION_MAP）：直接删括号和缩写，保留中文译名。
+         2. 括号内容是纯常见缩写，且长度 <= 10：可删除标记记 1。
+         3. 括号内容和前缀重复（标普500(S&P500) / S&P500(标普500)）：删括号和内容。
+      C. 最后，如果可删除标记的括号 >= 3 对，就把这些可删的全部删掉；否则保留前 1~2 对，其它冗余的删掉（保证<=2对）。
+    """
+    if not s:
+        return s
+
+    # A) 统一括号成中文括号，方便后续处理
+    s = s.replace('(', '（').replace(')', '）')
+
+    # 匹配：<前缀1~20字>（<内容>）
+    #   前缀是非括号非空白的字符，尽量短；内容不含中文括号
+    pattern = re.compile(r'(?P<prefix>[\u4e00-\u9fa5A-Za-z0-9&+\-\.\s]{1,20}?)（(?P<inner>[^（）]{0,40})）')
+
+    removable_ranges = []   # 候选可删除括号的 (start,end)
+    for m in pattern.finditer(s):
+        prefix = (m.group('prefix') or '').strip().lower()
+        inner  = (m.group('inner')  or '').strip()
+        inner_low = inner.lower().replace(' ', '')
+
+        # 情况 1：前缀(无括号尾部的词)是标准中文译名，inner是对应缩写
+        tail_word = re.sub(r'[\s\-]+$', '', (m.group('prefix') or '')).strip()
+        tail_low  = tail_word.lower()
+        if tail_word in _TRANSLATION_MAP and _TRANSLATION_MAP[tail_word] == inner_low:
+            removable_ranges.append((m.start('prefix') + len(tail_word), m.end()))
+            continue
+        # 兼容：前缀里最后一个词 = 译名
+        last_match = re.search(r'[\u4e00-\u9fa5A-Za-z]+$', tail_word or '')
+        if last_match:
+            last_word = last_match.group(0)
+            if last_word in _TRANSLATION_MAP and _TRANSLATION_MAP[last_word] == inner_low:
+                removable_ranges.append((m.start('prefix') + last_match.start(), m.end()))
+                continue
+
+        # 情况 2：inner 是纯常见缩写（不依赖前缀）
+        if inner_low in _COMMON_ABBREVS and len(inner) <= 10:
+            # 如果前缀本身已经提到了这个意思（例如"原油WTI（WTI）"或"WTI（西德克萨斯中质原油）"重复），整括号可删
+            pref_clean = re.sub(r'[\s\(\)（）\-]+', '', prefix or '')
+            inner_clean_nospace = inner_low.replace('&', '').replace('+', '')
+            if inner_clean_nospace in pref_clean or pref_clean.endswith(inner_clean_nospace[:-1]):
+                removable_ranges.append(m.span())
+                continue
+            # 其它情况：先标记为"可优先移除的冗余候选"
+            removable_ranges.append((m.start('inner') - 1, m.end()))  # 把括号一起删除（-1 包含开括号）
+
+        # 情况 3：前后重复：prefix 末尾 == inner（不区分大小写/空白）
+        pref_tail_clean = re.sub(r'[\s&+\.\-]+', '', prefix or '')
+        inner_no_space     = re.sub(r'[\s&+\.\-]+', '', inner_low)
+        if inner_no_space and (pref_tail_clean.endswith(inner_no_space) or inner_no_space.endswith(pref_tail_clean)):
+            removable_ranges.append((m.start('prefix') + max(0, len(prefix) - len(inner)), m.end()))
+
+    # C) 真正删除：保证整条摘要最后 <= 2 对括号。从后往前删除，避免索引漂移。
+    # 先数当前总括号对
+    total_pairs = s.count('（')
+    to_remove = []
+    if total_pairs > 2:
+        # 先把 removable_ranges 里标记的都尽量删；如果还是>2对，再把最前面的冗余也剥掉
+        removable_ranges_sorted = sorted(set(removable_ranges), key=lambda x: x[0], reverse=True)
+        for (a, b) in removable_ranges_sorted:
+            if total_pairs <= 2:
+                break
+            seg = s[a:b]
+            removed_pairs = seg.count('（')
+            if removed_pairs <= 0:
+                continue
+            s = s[:a] + s[b:]
+            total_pairs -= removed_pairs
+            to_remove.append((a, b))
+
+        # 如果还是 >2 对（说明没标到那么多），就直接把最靠前的那些括号里 inner 是纯常见缩写的硬删
+        if total_pairs > 2:
+            def _brute_force_remove(text):
+                pairs_left = text.count('（')
+                out = []
+                i = 0
+                while i < len(text):
+                    if text[i] == '（' and pairs_left > 2:
+                        j = text.find('）', i + 1)
+                        if j != -1:
+                            inner = text[i + 1:j]
+                            if inner.lower().strip() in _COMMON_ABBREVS:
+                                i = j + 1
+                                pairs_left -= 1
+                                continue
+                    out.append(text[i])
+                    i += 1
+                return ''.join(out)
+            s = _brute_force_remove(s)
+
+    # 最后清理可能留下的空括号和脏空格
+    s = s.replace('（）', '')
+    # 如果留下了孤立的半角括号（极少数没被替换干净的），清理
+    s = re.sub(r'[()]+', '', s)
+    # 中文字符之间的多余空格可能被上面生成，再次合并
+    s = re.sub(r'(?<=[\u4e00-\u9fa5，。！？；：])\s+(?=[\u4e00-\u9fa5A-Za-z0-9])', '', s)
+    return s
+
+
 class OllamaClient:
     """本地 LLM 客户端（OpenAI 兼容协议）"""
 
@@ -110,7 +357,7 @@ class OllamaClient:
                 content = ''.join(parts)
             content = (content or '').strip()
             if content:
-                return content
+                return _sanitize_llm_text(content)
 
             # ----- 2) content 为空，回退到 reasoning_content（LM Studio / Ollama 的 DeepSeek R1、Gemma 4、Qwen-R 等 extended-thinking 模型）
             reasoning = msg.get('reasoning_content') or msg.get('reasoning') or data.get('reasoning_content') or ''
@@ -123,17 +370,22 @@ class OllamaClient:
 
             extracted = self._extract_final_answer_from_reasoning(reasoning)
             if extracted:
-                cleaned = self._extract_final_answer_from_reasoning(extracted) or extracted
-                if len(cleaned) >= 20:
-                    logger.debug(f"content empty, answer recovered from reasoning_content ({len(extracted)} chars; cleaned={len(cleaned)} chars)")
-                    return cleaned
+                cleaned_raw = self._extract_final_answer_from_reasoning(extracted) or extracted
+                cleaned_final = _sanitize_llm_text(cleaned_raw)
+                if len(cleaned_final) >= 20:
+                    logger.debug(
+                        f"content empty, answer recovered from reasoning_content "
+                        f"({len(extracted)} -> {len(cleaned_raw)} -> {len(cleaned_final)} chars)"
+                    )
+                    return cleaned_final
                 logger.debug(f"content empty, raw extracted too short ({len(extracted)} chars)")
-                return extracted
+                return _sanitize_llm_text(extracted)
 
             # ----- 3) 推理里也没抽出答案：至少把非乱码的后半截（中文为主）塞回去，不要直接放超长 CoT 到 CSV
-            trimmed = self._trim_reasoning_noise(reasoning)
+            trimmed = _sanitize_llm_text(self._trim_reasoning_noise(reasoning))
             logger.warning(
-                f"Model {model} had no clean answer; fallback trimmed reasoning ({len(reasoning)} -> {len(trimmed)} chars)."
+                f"Model {model} had no clean answer; fallback trimmed reasoning "
+                f"({len(reasoning)} -> {len(trimmed)} chars)."
             )
             return trimmed
 

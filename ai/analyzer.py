@@ -136,10 +136,12 @@ class NewsAnalyzer:
             if cand and _chinese_char_ratio(cand) >= _chinese_char_ratio(summary):
                 summary = cand
 
-        # --- 最终清洗：去 markdown 代码块、长度上限按句末软截断 ---
+        # --- 最终清洗：去 markdown 代码块、长度上限按句末软截断 + 括号双保险 ---
         if summary:
-            summary = re.sub(r'^```(?:json|text)?\s*', '', summary)
-            summary = re.sub(r'\s*```\s*$', '', summary).strip()
+            # 方案A落地双保险：复用 ollama_client 层的 _sanitize_llm_text（去编号、The N chars、Role/Task 前缀）
+            from ai.ollama_client import _sanitize_llm_text
+            summary = _sanitize_llm_text(summary)
+
             summary = re.sub(r'^[\s　]*【?(摘要|总结|概要)】?\s*[::]\s*', '', summary, flags=re.I)
             if len(summary) > max_chars:
                 splits = re.split(r'(?<=[。！？!?；;])', summary)
@@ -152,7 +154,7 @@ class NewsAnalyzer:
                 summary = (rebuilt or summary[:max_chars]).rstrip()
                 if summary and summary[-1] not in '。！？!?':
                     summary += '。'
-            return summary
+            return summary.rstrip()
 
         # --- 真·中文兜底（绝不把原始英文 RSS summary / 长英文标题 直接塞进 ai_summary） ---
         logger.warning(f"Summary LLM empty, local Chinese fallback: {str(news.get('title',''))[:50]}")
