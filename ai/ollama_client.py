@@ -97,6 +97,13 @@ def _sanitize_llm_text(text: str) -> str:
     s = re.sub(r'^```(?:json|text)?\s*', '', s, flags=re.MULTILINE)
     s = re.sub(r'\s*```\s*$', '', s, flags=re.MULTILINE)
 
+    # 1.5) 结构化 JSON 响应（分类/打分）直接原样返回，不做面向自然语言的逐行清洗。
+    #      否则下面「丢弃整行不含汉字」会把 {\n "score": 62,\n "reasoning": "…",\n} 里的
+    #      结构行全部删掉（这些行本来就不含汉字），只剩 "reasoning": "…" 一行，
+    #      导致 parse_json_response 解析失败、打分/分类降级。
+    if s.lstrip()[:1] in ('{', '['):
+        return s.strip()
+
     # 2) 剥 "The N characters:" 这种逐字计数整行
     s = re.sub(r'(?im)^\s*The\s+\d+\s+characters?\s*[:：]\s*', '', s)
     s = re.sub(r'(?im)^\s*Character\s+count\s*[:：].*$', '', s)
